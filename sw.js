@@ -2,7 +2,7 @@
 // Rende il gioco installabile e giocabile offline.
 // Il gioco (index.html) viene scaricato "prima dalla rete" quando c'è connessione,
 // così ogni aggiornamento caricato su GitHub arriva subito; se non c'è rete si usa la copia salvata.
-const CACHE = 'rice-power-v2';
+const CACHE = 'rice-power-v3';
 const FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png', './icon-512-maskable.png', './apple-touch-icon.png', './favicon-32.png'];
 
 self.addEventListener('install', e => {

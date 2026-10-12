@@ -112,7 +112,9 @@
 'use strict';
 // ============================================================================
 //  RICE POWER - La leggenda del Riso Supremo
-//  Versione 1.0 - GIOCO COMPLETO: PROLOGO, RISAIA, VULCANO, CITTÀ INVASA, RITORNO AL KARAGUASHI
+//  Versione 1.1 - GIOCO COMPLETO: PROLOGO, RISAIA, VULCANO, CITTÀ INVASA, RITORNO AL KARAGUASHI
+//  1.1: colonna sonora rock 16-bit, città del prologo meno affollata,
+//       game loop a prova di errore e protezioni anti-blocco per Tako Inferno
 //
 //  Un solo file HTML. Niente librerie, niente immagini, niente audio esterno.
 //  Tutta la grafica è disegnata su Canvas, l'audio è sintetizzato via Web Audio.
@@ -121,7 +123,7 @@
 //   1. CONFIG       - costanti di gioco
 //   2. UTIL         - funzioni di utilità e primitive di disegno
 //   3. FONT         - font bitmap 5x7 disegnato via codice (con accenti)
-//   4. AUDIO        - effetti sonori e musica chiptune (Web Audio API)
+//   4. AUDIO        - effetti sonori e musica rock 16-bit (Web Audio API)
 //   5. INPUT        - tastiera e mouse
 //   6. TOUCH        - joystick virtuale e pulsanti per tablet
 //   7. MAPPE        - ristorante, città, risaia, vulcano, città invasa, Karaguashi (+ 4 arene)
@@ -459,174 +461,348 @@ const Sound = {
   }
 };
 
-// Nota (es. 'A4') -> frequenza in Hz
-function noteFreq(n) {
-  const NOTES = { C: 0, 'C#': 1, D: 2, 'D#': 3, E: 4, F: 5, 'F#': 6, G: 7, 'G#': 8, A: 9, 'A#': 10, B: 11 };
-  const m = /^([A-G]#?)(\d)$/.exec(n);
-  if (!m) return 440;
-  const semi = NOTES[m[1]] + (parseInt(m[2], 10) + 1) * 12;
-  return 440 * Math.pow(2, (semi - 69) / 12);
+// ---------------------------------------------------------------------------
+// MUSICA - motore "16-bit arcade rock" (stile picchiaduro anni '90)
+//   Batteria sintetizzata (cassa, rullante, charleston, tom, piatto),
+//   basso FM "slap", chitarra ritmica distorta in power chord,
+//   lead con vibrato ed eco, seconda voce armonizzata per terze, arpeggi.
+//   Ogni brano ha:
+//     lead   : una stringa per battuta, token "NOTA:durata" (durata in sedicesimi,
+//              "r" = pausa, "~" = prolunga la nota precedente). Ogni battuta = 16.
+//     chords : una stringa per battuta, 4 slot (uno per quarto), "." = tiene l'accordo
+//     drums / gtr / bass : stili di accompagnamento (vedi DRUM_STYLES ecc.)
+//     harm   : battute armonizzate (al secondo giro del loop si armonizza tutto)
+//   Tutte le melodie sono originali.
+// ---------------------------------------------------------------------------
+const NOTE_PC = { C: 0, 'C#': 1, Db: 1, D: 2, 'D#': 3, Eb: 3, E: 4, F: 5, 'F#': 6, Gb: 6, G: 7, 'G#': 8, Ab: 8, A: 9, 'A#': 10, Bb: 10, B: 11 };
+function noteMidi(n) {
+  const m = /^([A-G](?:#|b)?)(\d)$/.exec(n);
+  return m ? NOTE_PC[m[1]] + (parseInt(m[2], 10) + 1) * 12 : 69;
 }
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function noteFreq(n) { return midiFreq(noteMidi(n)); }
 
-// Sequencer minimale: due tracce (melodia + basso) a passi di sedicesimi
+const SCALES = { minor: [0, 2, 3, 5, 7, 8, 10], major: [0, 2, 4, 5, 7, 9, 11], dorian: [0, 2, 3, 5, 7, 9, 10] };
+// Accordo: "Em", "C", "E5" (power chord), "B7"
+function parseChord(sym) {
+  const m = /^([A-G](?:#|b)?)(m|5|7)?$/.exec(sym);
+  if (!m) return { root: 9, tones: [0, 3, 7] };
+  const q = m[2] || '';
+  return { root: NOTE_PC[m[1]], tones: q === 'm' ? [0, 3, 7] : q === '5' ? [0, 7, 12] : q === '7' ? [0, 4, 7, 10] : [0, 4, 7] };
+}
+// Porta una classe di altezza in un intervallo [lo, lo+11]
+function pcInRange(pc, lo) { return lo + ((pc - lo) % 12 + 12) % 12; }
+
+// Pattern di batteria su 16 sedicesimi: x = colpo, X = accento
+const DRUM_STYLES = {
+  rock:     { k: 'x.......x.x.....', s: '....X.......X...', h: 'x.x.x.x.x.x.x.x.' },
+  halftime: { k: 'x.....x...x.....', s: '........X.......', h: 'x.x.x.x.x.x.x.x.' },
+  island:   { k: 'x.....x.x.....x.', s: '....X.......X...', h: 'x.xxx.x.x.xxx.x.', t: '..........x...x.' },
+  gallop:   { k: 'x..x....x..x....', s: '....X.......X...', h: 'x.x.x.x.x.x.x.x.' },
+  dbass:    { k: 'x.x.x.x.x.x.x.x.', s: '....X.......X...', h: '..x...x...x...x.' },
+};
+
 const Music = {
   tracks: {
-    // Tema del titolo / ristorante: lento e misterioso
+    // Titolo: ballata rock epica, mid-tempo (Mi minore)
     title: {
-      bpm: 96, leadType: 'triangle', leadVol: 0.07, bassVol: 0.09,
-      lead: ['E4','','','','G4','','','','A4','','','','','','C5','',
-             'B4','','','','A4','','','','G4','','','','','','E4','',
-             'D4','','','','E4','','','','G4','','','','','','A4','',
-             'G4','','','','E4','','','','D4','','','','','','',''],
-      bass: ['A2','','','','','','','','E2','','','','','','','',
-             'F2','','','','','','','','G2','','','','','','','',
-             'A2','','','','','','','','E2','','','','','','','',
-             'F2','','','','','','','','E2','','','','','','','']
+      bpm: 112, key: 4, scale: 'minor', drums: 'halftime', gtr: 'quarters', bass: 'roots', arp: false, harm: [4, 5, 6, 7],
+      chords: ['Em . . .', 'C . D .', 'Em . . .', 'C . B .', 'G . . .', 'D . . .', 'C . D .', 'B . . .'],
+      lead: ['B4:4 E5:4 F#5:2 G5:2 A5:4', 'G5:6 F#5:2 E5:4 D5:4', 'E5:4 B4:4 E5:2 F#5:2 G5:4', 'A5:6 G5:2 F#5:4 D#5:4',
+             'B5:6 A5:2 G5:4 D5:4', 'F#5:8 A5:4 F#5:4', 'G5:4 E5:4 F#5:4 A5:4', 'B5:12 r:4']
     },
-    // Tema della città: chiptune vivace
+    // Città: rock da strada, basso in ottave, arpeggi (La minore)
     city: {
-      bpm: 150, leadType: 'square', leadVol: 0.05, bassVol: 0.1,
-      lead: ['A4','','A4','','C5','','E5','','D5','','C5','','D5','','E5','',
-             'G4','','G4','','B4','','D5','','C5','','B4','','A4','','','',
-             'A4','','C5','','E5','','A5','','G5','','E5','','D5','','C5','',
-             'B4','','D5','','G5','','F5','','E5','','D5','','C5','','B4',''],
-      bass: ['A2','','','','A2','','A3','','E2','','','','E2','','E3','',
-             'G2','','','','G2','','G3','','E2','','','','E2','','E3','',
-             'F2','','','','F2','','F3','','C2','','','','C2','','C3','',
-             'G2','','','','G2','','G3','','E2','','','','E2','','E3','']
+      bpm: 150, key: 9, scale: 'minor', drums: 'rock', gtr: '8ths', bass: 'octave', arp: true, harm: [8, 9, 10, 11, 12, 13, 14, 15],
+      chords: ['Am . . .', 'F . G .', 'Am . . .', 'F . E .', 'Am . . .', 'F . G .', 'Am . . .', 'F . E .',
+               'F . G .', 'Em . Am .', 'F . G .', 'E . . .', 'Dm . E .', 'Am . F .', 'Dm . G .', 'E . . .'],
+      lead: ['A4:2 C5:2 E5:3 A5:3 G5:2 E5:4', 'F5:3 E5:3 D5:2 E5:2 D5:2 B4:4', 'A4:2 C5:2 E5:3 A5:3 B5:2 C6:4', 'A5:3 G5:3 F5:2 E5:4 G#5:4',
+             'A5:2 G5:2 E5:2 A5:2 r:2 E5:2 G5:2 A5:2', 'C6:3 B5:3 A5:2 G5:4 D5:4', 'E5:2 A5:2 C6:3 B5:3 A5:2 G5:2 E5:2', 'F5:3 E5:3 D5:2 B4:4 G#4:4',
+             'A5:4 G5:2 F5:2 G5:6 D5:2', 'E5:4 B4:2 E5:2 A5:6 C6:2', 'A5:4 G5:2 F5:2 G5:4 B5:4', 'G#5:6 E5:2 B5:8',
+             'A5:3 F5:3 D5:2 G#5:3 E5:3 B4:2', 'C5:3 E5:3 A5:2 C6:4 A5:4', 'D6:3 C6:3 A5:2 B5:3 G5:3 D5:2', 'E5:4 G#5:4 B5:4 E6:4']
     },
-    // Tema della risaia: pentatonica calma, aria di montagna
+    // Risaia: rock melodico con scala pentatonica, aria di montagna (Re maggiore)
     risaia: {
-      bpm: 104, leadType: 'triangle', leadVol: 0.07, bassVol: 0.08,
-      lead: ['D5','','','','E5','','','','G5','','','','','','A5','',
-             'G5','','','','E5','','','','D5','','','','','','','',
-             'A4','','','','D5','','','','E5','','','','','','G5','',
-             'E5','','D5','','A4','','','','','','','','','','','',
-             'G5','','','','A5','','','','D6','','','','','','A5','',
-             'G5','','E5','','D5','','','','E5','','','','','','','',
-             'D5','','','','A4','','','','G4','','','','','','A4','',
-             'D5','','','','','','','','','','','','','','',''],
-      bass: ['D2','','','','','','','','A2','','','','','','','',
-             'G2','','','','','','','','D2','','','','','','','',
-             'D2','','','','','','','','A2','','','','','','','',
-             'C2','','','','','','','','D2','','','','','','','',
-             'G2','','','','','','','','D2','','','','','','','',
-             'C2','','','','','','','','D2','','','','','','','',
-             'G2','','','','','','','','A2','','','','','','','',
-             'D2','','','','','','','','D2','','','','','','','']
+      bpm: 128, key: 2, scale: 'major', drums: 'rock', gtr: '8ths', bass: 'drive8', arp: false, harm: [4, 5, 6, 7],
+      chords: ['D . . .', 'G . A .', 'Bm . . .', 'G . A .', 'D . . .', 'G . A .', 'Em . G .', 'A . . .'],
+      lead: ['D5:4 E5:2 F#5:2 A5:6 F#5:2', 'B5:4 A5:2 F#5:2 E5:4 A4:4', 'B4:2 D5:2 F#5:4 E5:2 D5:2 B4:4', 'D5:4 E5:4 F#5:2 E5:2 C#5:4',
+             'A5:4 B5:2 A5:2 F#5:4 D6:4', 'B5:6 A5:2 F#5:4 E5:4', 'E5:2 F#5:2 G5:4 B5:4 D6:4', 'C#6:4 A5:4 E5:4 A5:4']
     },
-    // Tema dell'isola: tropicale ma inquieto, con il basso che "ribolle"
+    // Isola del vulcano: rock tropicale sincopato, con i tom (Mi dorico)
     vulcano: {
-      bpm: 122, leadType: 'square', leadVol: 0.045, bassVol: 0.1,
-      lead: ['E4','','G4','','A4','','','','B4','','A4','','G4','','E4','',
-             'D4','','E4','','','','G4','','','','','','A4','','G4','',
-             'E4','','G4','','A4','','','','C5','','B4','','A4','','G4','',
-             'A#4','','A4','','G4','','E4','','','','','','','','','',
-             'E5','','D5','','B4','','','','A4','','G4','','A4','','B4','',
-             'G4','','','','E4','','','','','','','','D4','','E4','',
-             'G4','','A4','','B4','','','','A#4','','A4','','G4','','E4','',
-             'D4','','','','E4','','','','','','','','','','',''],
-      bass: ['E2','','E2','','','E2','','','E2','','E2','','','E2','','',
-             'D2','','D2','','','D2','','','D2','','D2','','','D2','','',
-             'E2','','E2','','','E2','','','E2','','E2','','','E2','','',
-             'A#1','','A#1','','','A#1','','','B1','','B1','','','B1','','',
-             'E2','','E2','','','E2','','','E2','','E2','','','E2','','',
-             'G2','','G2','','','G2','','','G2','','G2','','','G2','','',
-             'A2','','A2','','','A2','','','A#2','','A#2','','','A#2','','',
-             'B1','','B1','','','B1','','','B1','','','','E2','','','']
+      bpm: 140, key: 4, scale: 'dorian', drums: 'island', gtr: 'stab', bass: 'octave', arp: false, harm: [4, 5, 6],
+      chords: ['Em . . .', 'D . . .', 'C . D .', 'Em . . .', 'Am . . .', 'C . D .', 'Em . C .', 'B . . .'],
+      lead: ['E5:3 G5:3 A5:2 B5:3 A5:3 G5:2', 'F#5:3 D5:3 E5:2 F#5:4 A5:4', 'G5:3 E5:3 C5:2 D5:3 F#5:3 A5:2', 'G5:6 F#5:2 E5:8',
+             'A5:3 C6:3 B5:2 A5:3 E5:3 C5:2', 'E5:3 G5:3 C6:2 B5:3 A5:3 F#5:2', 'G5:4 E5:2 B5:2 C6:4 E6:4', 'D#6:6 B5:2 F#5:4 D#5:4']
     },
-    // Tema della città invasa: pulsante e alieno, basso cromatico che scende
+    // Città invasa: metal al galoppo, cupo (Mi minore)
     invasa: {
-      bpm: 132, leadType: 'sawtooth', leadVol: 0.035, bassVol: 0.11,
-      lead: ['E5','','','D#5','','','E5','','','','B4','','','','','',
-             'E5','','','D#5','','','E5','','','','G5','','F#5','','','',
-             'E5','','','D#5','','','E5','','','','B4','','','','','',
-             'A4','','','','A#4','','','','B4','','','','','','','',
-             'G5','','','F#5','','','G5','','','','E5','','','','','',
-             'G5','','','F#5','','','G5','','','','B5','','A5','','','',
-             'E5','','','D#5','','','E5','','','','B4','','','','','',
-             'C5','','','','B4','','','','A#4','','','','B4','','',''],
-      bass: ['E2','','E2','','','','E2','','D#2','','D#2','','','','D#2','',
-             'D2','','D2','','','','D2','','C#2','','C#2','','','','C#2','',
-             'C2','','C2','','','','C2','','B1','','B1','','','','B1','',
-             'A#1','','A#1','','','','A#1','','B1','','B1','','','','B1','',
-             'E2','','E2','','','','E2','','D#2','','D#2','','','','D#2','',
-             'D2','','D2','','','','D2','','C#2','','C#2','','','','C#2','',
-             'C2','','C2','','','','C2','','B1','','B1','','','','B1','',
-             'A#1','','','','B1','','','','B1','','','','E2','','','']
+      bpm: 150, key: 4, scale: 'minor', drums: 'gallop', gtr: 'gallop', bass: 'gallop', arp: false, harm: [4, 5, 6, 7],
+      chords: ['E5 . . .', 'E5 . . .', 'C . . .', 'D . . .', 'E5 . . .', 'E5 . . .', 'C . D .', 'B . . .'],
+      lead: ['E5:2 r:2 E5:2 F#5:2 G5:4 F#5:2 E5:2', 'B5:6 A5:2 G5:4 F#5:4', 'G5:2 r:2 G5:2 A5:2 B5:4 A5:2 G5:2', 'A5:6 G5:2 F#5:4 D5:4',
+             'E6:4 D6:2 B5:2 C6:4 B5:2 G5:2', 'B5:4 A5:2 G5:2 A5:4 B5:4', 'C6:4 B5:2 G5:2 A5:4 F#5:4', 'D#6:4 B5:4 F#5:4 D#5:4']
     },
-    // Tema del ristorante di notte: il motivo del titolo, ma più teso e veloce
+    // Ristorante di notte: teso, scala minore armonica (La minore)
     karaguashi: {
-      bpm: 118, leadType: 'triangle', leadVol: 0.07, bassVol: 0.1,
-      lead: ['E4','','','','G4','','','','A4','','','','C5','','','',
-             'B4','','','','A4','','G4','','E4','','','','','','','',
-             'D4','','','','E4','','','','G4','','','','A4','','B4','',
-             'G4','','','','E4','','D4','','E4','','','','','','','',
-             'E4','','','','G4','','','','A4','','','','C5','','','',
-             'D5','','','','C5','','B4','','A4','','','','','','','',
-             'G#4','','','','A4','','','','B4','','','','D5','','C5','',
-             'B4','','','','A4','','G#4','','A4','','','','','','',''],
-      bass: ['A2','','A2','','','','A2','','E2','','E2','','','','E2','',
-             'F2','','F2','','','','F2','','G2','','G2','','','','G2','',
-             'A2','','A2','','','','A2','','E2','','E2','','','','E2','',
-             'F2','','F2','','','','F2','','E2','','E2','','','','E2','',
-             'A2','','A2','','','','A2','','E2','','E2','','','','E2','',
-             'F2','','F2','','','','F2','','G2','','G2','','','','G2','',
-             'E2','','E2','','','','E2','','E2','','E2','','','','E2','',
-             'A2','','','','E2','','','','A2','','','','','','','']
+      bpm: 136, key: 9, scale: 'minor', drums: 'rock', gtr: '8ths', bass: 'drive8', arp: true, harm: [4, 5, 6],
+      chords: ['Am . . .', 'Am . . .', 'F . . .', 'E . . .', 'Dm . . .', 'Am . . .', 'F . E .', 'Am . . .'],
+      lead: ['A4:2 B4:2 C5:2 E5:2 A5:4 G#5:2 A5:2', 'B5:4 A5:2 E5:2 C5:4 E5:4', 'F5:4 E5:2 D5:2 C5:4 A4:4', 'B4:4 G#4:4 E5:4 G#5:4',
+             'D5:2 E5:2 F5:2 A5:2 D6:4 C6:2 A5:2', 'E6:4 C6:2 A5:2 B5:4 C6:4', 'A5:2 C6:2 F6:4 E6:2 D6:2 B5:4', 'A5:12 r:4']
     },
-    // Tema dello Chef: il motivo del titolo trasformato in una marcia furiosa
-    chefboss: {
-      bpm: 176, leadType: 'square', leadVol: 0.05, bassVol: 0.12,
-      lead: ['E5','','E5','','G5','','A5','','C6','','B5','','A5','','G5','',
-             'E5','','','','D5','','E5','','','','','','','','','',
-             'D5','','D5','','E5','','G5','','A5','','G5','','E5','','D5','',
-             'B4','','','','C5','','B4','','A4','','','','','','','',
-             'E5','','E5','','G5','','A5','','C6','','B5','','A5','','G5','',
-             'E5','','','','D5','','E5','','G5','','','','A5','','','',
-             'G#5','','','','A5','','B5','','C6','','B5','','A5','','G#5','',
-             'A5','','','','E5','','','','A5','','','','','','',''],
-      bass: ['A2','','A3','','A2','','A3','','E2','','E3','','E2','','E3','',
-             'F2','','F3','','F2','','F3','','G2','','G3','','G2','','G3','',
-             'A2','','A3','','A2','','A3','','E2','','E3','','E2','','E3','',
-             'F2','','F3','','F2','','F3','','E2','','E3','','E2','','E3','',
-             'A2','','A3','','A2','','A3','','E2','','E3','','E2','','E3','',
-             'F2','','F3','','F2','','F3','','G2','','G3','','G2','','G3','',
-             'E2','','E3','','E2','','E3','','E2','','E3','','E2','','E3','',
-             'A2','','A3','','E2','','E3','','A2','','','','','','','']
-    },
-    // Tema del boss: martellante e minaccioso
+    // Boss: veloce e aggressivo, doppia cassa (Re minore)
     boss: {
-      bpm: 168, leadType: 'square', leadVol: 0.045, bassVol: 0.12,
-      lead: ['D4','','D4','','F4','','D4','','G#4','','G4','','F4','','D4','',
-             'D4','','D4','','F4','','D4','','A#4','','A4','','G4','','F4','',
-             'D5','','','','C5','','A#4','','A4','','','','G4','','F4','',
-             'G#4','','G4','','F4','','D4','','','','','','','','',''],
-      bass: ['D2','','D2','D2','','D2','','D2','D2','','D2','D2','','D2','','',
-             'D2','','D2','D2','','D2','','D2','A#1','','A#1','A#1','','A#1','','',
-             'G1','','G1','G1','','G1','','G1','G#1','','G#1','G#1','','G#1','','',
-             'A1','','A1','A1','','A1','','A1','A1','','','','D2','','','']
+      bpm: 168, key: 2, scale: 'minor', drums: 'dbass', gtr: '16ths', bass: 'drive8', arp: false, harm: [4, 5, 6],
+      chords: ['Dm . . .', 'Bb . C .', 'Dm . . .', 'Bb . A .', 'Gm . . .', 'Bb . C .', 'Dm . Bb .', 'A . . .'],
+      lead: ['D5:2 D5:2 F5:2 D5:2 A5:4 G#5:2 G5:2', 'F5:4 D5:2 F5:2 G5:4 E5:4', 'D6:2 C6:2 A5:2 F5:2 A5:4 G5:2 F5:2', 'F5:4 D5:2 F5:2 E5:4 C#5:4',
+             'G5:2 A5:2 Bb5:4 A5:2 G5:2 D5:4', 'F5:4 D5:2 F5:2 G5:4 C6:4', 'D6:4 C6:2 A5:2 Bb5:4 F5:4', 'E5:4 A5:4 C#6:4 E6:4']
+    },
+    // Chef Karaguashi: il gran finale, epico e velocissimo (La minore)
+    chefboss: {
+      bpm: 176, key: 9, scale: 'minor', drums: 'dbass', gtr: '16ths', bass: 'octave', arp: true, harm: [4, 5, 6, 7],
+      chords: ['Am . . .', 'F . G .', 'Am . . .', 'F . E .', 'Dm . . .', 'G . . .', 'C . F .', 'E . . .'],
+      lead: ['E5:2 A5:2 C6:2 B5:2 A5:4 E5:4', 'F5:2 A5:2 C6:2 A5:2 B5:4 G5:4', 'A5:2 C6:2 E6:2 D6:2 C6:2 B5:2 A5:4', 'C6:4 A5:2 F5:2 G#5:4 B5:4',
+             'A5:2 D6:2 F6:2 E6:2 D6:4 A5:4', 'B5:2 D6:2 G6:4 F6:2 D6:2 B5:4', 'C6:2 E6:2 G6:4 F6:2 C6:2 A5:4', 'G#5:4 B5:4 E6:4 G#6:4']
     }
   },
-  cur: null, curName: null, step: 0, next: 0,
+  compiled: {}, cur: null, curName: null, step: 0, next: 0, bus: null, shaperCurve: null,
+
+  // Trasforma le stringhe del brano in eventi per sedicesimo
+  compile(t) {
+    const steps = t.lead.length * 16, lead = new Array(steps).fill(null), chord = new Array(steps).fill(null), chordStart = new Array(steps).fill(false);
+    t.lead.forEach((bar, bi) => {
+      let pos = bi * 16;
+      for (const tok of bar.trim().split(/\s+/)) {
+        const parts = tok.split(':'), n = parts[0], len = parseInt(parts[1], 10) || 1;
+        if (n === '~') { for (let k = pos - 1; k >= 0; k--) if (lead[k]) { lead[k].len += len; break; } }
+        else if (n !== 'r' && pos < steps) lead[pos] = { midi: noteMidi(n), len };
+        pos += len;
+      }
+    });
+    let cur = null;
+    t.chords.forEach((bar, bi) => {
+      bar.trim().split(/\s+/).slice(0, 4).forEach((c, beat) => {
+        const i0 = bi * 16 + beat * 4;
+        if (c !== '.') { cur = parseChord(c); chordStart[i0] = true; }
+        for (let k = 0; k < 4; k++) if (i0 + k < steps) chord[i0 + k] = cur;
+      });
+    });
+    const last = chord[steps - 1] || parseChord('Am');
+    for (let i = 0; i < steps; i++) { if (!chord[i]) chord[i] = last; else break; }
+    return Object.assign({}, t, { steps, leadEv: lead, chord, chordStart, scaleArr: SCALES[t.scale] || SCALES.minor });
+  },
   play(name) {
     if (this.curName === name) return;
-    this.curName = name; this.cur = this.tracks[name] || null; this.step = 0;
-    this.next = Sound.ready ? Sound.ctx.currentTime + 0.05 : 0;
+    this.curName = name;
+    const t = this.tracks[name];
+    this.cur = t ? (this.compiled[name] || (this.compiled[name] = this.compile(t))) : null;
+    this.step = 0;
+    this.releaseBus();
+    this.next = Sound.ready ? Sound.ctx.currentTime + 0.08 : 0;
   },
-  stop() { this.cur = null; this.curName = null; },
+  stop() { this.cur = null; this.curName = null; this.releaseBus(); },
+  // Sfuma il mix del brano precedente (le note già programmate non si accavallano)
+  releaseBus() {
+    const old = this.bus; this.bus = null;
+    if (!old || !Sound.ready) return;
+    try { old.out.gain.setTargetAtTime(0, Sound.ctx.currentTime, 0.06); } catch (e) {}
+    setTimeout(() => { try { old.out.disconnect(); } catch (e) {} }, 900);
+  },
+  // Catena del mix: voci -> compressore -> uscita. Chitarra con distorsione,
+  // lead con mandata d'eco.
+  ensureBus() {
+    if (this.bus) return this.bus;
+    const ac = Sound.ctx;
+    if (!this.shaperCurve) {
+      const n = 1024, cv = new Float32Array(n);
+      for (let i = 0; i < n; i++) { const x = i * 2 / n - 1; cv[i] = Math.tanh(x * 7); }
+      this.shaperCurve = cv;
+    }
+    const out = ac.createGain(); out.gain.value = 0.55; out.connect(Sound.master);
+    const comp = ac.createDynamicsCompressor();
+    comp.threshold.value = -16; comp.ratio.value = 4; comp.attack.value = 0.004; comp.release.value = 0.12; comp.knee.value = 6;
+    comp.connect(out);
+    const mix = ac.createGain(); mix.gain.value = 1; mix.connect(comp);
+    // chitarra: drive -> distorsione -> passa basso ("cassa") -> mix
+    const gtrIn = ac.createGain(); gtrIn.gain.value = 1.6;
+    const shaper = ac.createWaveShaper(); shaper.curve = this.shaperCurve;
+    const cab = ac.createBiquadFilter(); cab.type = 'lowpass'; cab.frequency.value = 3200; cab.Q.value = 0.9;
+    const mid = ac.createBiquadFilter(); mid.type = 'peaking'; mid.frequency.value = 900; mid.gain.value = 3; mid.Q.value = 0.8;
+    const gtrOut = ac.createGain(); gtrOut.gain.value = 0.16;
+    gtrIn.connect(shaper); shaper.connect(cab); cab.connect(mid); mid.connect(gtrOut); gtrOut.connect(mix);
+    // eco del lead
+    const fxIn = ac.createGain(); fxIn.gain.value = 1;
+    const delay = ac.createDelay(1.0); delay.delayTime.value = this.cur ? Math.min(0.9, 60 / this.cur.bpm * 0.75) : 0.3;
+    const fb = ac.createGain(); fb.gain.value = 0.3;
+    const dlp = ac.createBiquadFilter(); dlp.type = 'lowpass'; dlp.frequency.value = 2400;
+    const wet = ac.createGain(); wet.gain.value = 0.28;
+    fxIn.connect(delay); delay.connect(dlp); dlp.connect(fb); fb.connect(delay); dlp.connect(wet); wet.connect(mix);
+    this.bus = { out, mix, gtrIn, fxIn };
+    return this.bus;
+  },
+
+  // --- Voci -------------------------------------------------------------
+  env(g, t, vol, attack, dur, release) {
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + attack);
+    g.gain.setValueAtTime(vol, t + Math.max(attack, dur - release));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  },
+  noise(t, dur, vol, type, freq, q, dest) {
+    const ac = Sound.ctx, s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+    s.buffer = Sound.noiseBuf; f.type = type; f.frequency.value = freq; f.Q.value = q;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); g.connect(dest);
+    s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.02);
+  },
+  drum(kind, t, accent) {
+    const ac = Sound.ctx, mix = this.bus.mix, a = accent ? 1.15 : 1;
+    switch (kind) {
+      case 'k': {
+        const o = ac.createOscillator(), g = ac.createGain();
+        o.type = 'sine'; o.frequency.setValueAtTime(165, t); o.frequency.exponentialRampToValueAtTime(48, t + 0.11);
+        g.gain.setValueAtTime(0.85, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.24);
+        o.connect(g); g.connect(mix); o.start(t); o.stop(t + 0.26);
+        this.noise(t, 0.015, 0.25, 'highpass', 3000, 0.7, mix); // "click" del battente
+        break;
+      }
+      case 's': {
+        this.noise(t, 0.17, 0.5 * a, 'highpass', 1100, 0.7, mix);
+        this.noise(t, 0.08, 0.25 * a, 'bandpass', 3500, 0.9, mix);
+        const o = ac.createOscillator(), g = ac.createGain();
+        o.type = 'triangle'; o.frequency.setValueAtTime(200, t); o.frequency.exponentialRampToValueAtTime(140, t + 0.07);
+        g.gain.setValueAtTime(0.32 * a, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+        o.connect(g); g.connect(mix); o.start(t); o.stop(t + 0.1);
+        break;
+      }
+      case 'h': this.noise(t, 0.035, 0.11, 'highpass', 7500, 0.8, mix); break;
+      case 'o': this.noise(t, 0.2, 0.09, 'highpass', 7000, 0.8, mix); break;
+      case 'c': this.noise(t, 1.3, 0.17, 'highpass', 4200, 0.5, mix); this.noise(t, 0.6, 0.08, 'bandpass', 9000, 0.6, mix); break;
+      default: { // tom: kind = 'tom:FREQ'
+        const f = parseFloat(kind.slice(4)) || 140;
+        const o = ac.createOscillator(), g = ac.createGain();
+        o.type = 'sine'; o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f * 0.55, t + 0.22);
+        g.gain.setValueAtTime(0.55, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+        o.connect(g); g.connect(mix); o.start(t); o.stop(t + 0.3);
+        this.noise(t, 0.05, 0.12, 'bandpass', f * 4, 1, mix);
+      }
+    }
+  },
+  // Basso FM: portante + modulante (rapporto 2:1) con indice che decade = attacco "slap"
+  bass(midi, t, dur, vol) {
+    const ac = Sound.ctx, f = midiFreq(midi);
+    const car = ac.createOscillator(), mod = ac.createOscillator(), mg = ac.createGain(), sub = ac.createOscillator(), g = ac.createGain();
+    car.type = 'sine'; car.frequency.value = f;
+    mod.type = 'sine'; mod.frequency.value = f * 2;
+    mg.gain.setValueAtTime(f * 3.2, t); mg.gain.exponentialRampToValueAtTime(f * 0.7, t + 0.14);
+    mod.connect(mg); mg.connect(car.frequency);
+    sub.type = 'triangle'; sub.frequency.value = f;
+    const sg = ac.createGain(); sg.gain.value = 0.5;
+    car.connect(g); sub.connect(sg); sg.connect(g); g.connect(this.bus.mix);
+    this.env(g, t, vol, 0.005, dur, 0.05);
+    for (const o of [car, mod, sub]) { o.start(t); o.stop(t + dur + 0.03); }
+  },
+  // Chitarra ritmica: power chord con due seghe leggermente scordate per corda.
+  // mute = "palm mute": nota breve e scura.
+  guitar(midis, t, dur, vol, mute) {
+    const ac = Sound.ctx, g = ac.createGain(), f = ac.createBiquadFilter();
+    f.type = 'lowpass'; f.frequency.value = mute ? 1100 : 4200; f.Q.value = 0.7;
+    f.connect(g); g.connect(this.bus.gtrIn);
+    this.env(g, t, vol, 0.004, dur, mute ? 0.03 : 0.08);
+    for (const m of midis) for (const det of [-7, 7]) {
+      const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = midiFreq(m); o.detune.value = det;
+      o.connect(f); o.start(t); o.stop(t + dur + 0.03);
+    }
+  },
+  // Lead: quadra + sega scordata, filtro, vibrato ritardato, mandata d'eco
+  lead(midi, t, dur, vol) {
+    const ac = Sound.ctx, fr = midiFreq(midi);
+    const o1 = ac.createOscillator(), o2 = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain();
+    o1.type = 'square'; o2.type = 'sawtooth'; o1.frequency.value = fr; o2.frequency.value = fr; o2.detune.value = 9;
+    f.type = 'lowpass'; f.frequency.value = 3400; f.Q.value = 1.2;
+    const g2 = ac.createGain(); g2.gain.value = 0.6;
+    o1.connect(f); o2.connect(g2); g2.connect(f); f.connect(g);
+    g.connect(this.bus.mix); g.connect(this.bus.fxIn);
+    this.env(g, t, vol, 0.008, dur, 0.06);
+    const nodes = [o1, o2];
+    if (dur > 0.24) { // vibrato che entra piano sulle note lunghe
+      const lfo = ac.createOscillator(), lg = ac.createGain();
+      lfo.type = 'sine'; lfo.frequency.value = 5.8;
+      lg.gain.setValueAtTime(0, t); lg.gain.setValueAtTime(0, t + 0.12); lg.gain.linearRampToValueAtTime(fr * 0.014, t + Math.min(dur, 0.4));
+      lfo.connect(lg); lg.connect(o1.frequency); lg.connect(o2.frequency); nodes.push(lfo);
+    }
+    for (const o of nodes) { o.start(t); o.stop(t + dur + 0.03); }
+  },
+  arp(midi, t, dur, vol) {
+    const ac = Sound.ctx, o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'square'; o.frequency.value = midiFreq(midi);
+    o.connect(g); g.connect(this.bus.mix); g.connect(this.bus.fxIn);
+    this.env(g, t, vol, 0.003, dur, 0.02);
+    o.start(t); o.stop(t + dur + 0.02);
+  },
+  // Terza diatonica sotto (seconda chitarra solista); note fuori scala: terza maggiore sotto
+  harmony(midi, tr) {
+    const pc = ((midi - tr.key) % 12 + 12) % 12, sc = tr.scaleArr, idx = sc.indexOf(pc);
+    if (idx < 0) return midi - 4;
+    const j = idx - 2, down = j < 0 ? sc[j + 7] - 12 : sc[j];
+    return midi - (pc - down);
+  },
+
+  // --- Sequencer ----------------------------------------------------------
+  playStep(tr, step, t, sd) {
+    const i = step % tr.steps, s = i % 16, bar = (i / 16) | 0, pass = Math.floor(step / tr.steps);
+    const ch = tr.chord[i], dp = DRUM_STYLES[tr.drums] || DRUM_STYLES.rock;
+    // Batteria (rullata alla fine di ogni frase da 8 battute, piccola rullata ogni 4)
+    const bigFill = bar % 8 === 7 && s >= 12, smallFill = bar % 4 === 3 && bar % 8 !== 7 && s >= 14;
+    if (s === 0 && bar % 8 === 0) this.drum('c', t);
+    const kk = dp.k[s]; if (kk !== '.') this.drum('k', t, kk === 'X');
+    if (bigFill) {
+      this.drum(s === 12 ? 's' : s === 13 ? 'tom:220' : s === 14 ? 'tom:160' : 'tom:110', t, true);
+    } else if (smallFill) {
+      this.drum('s', t, s === 15);
+    } else {
+      const sn = dp.s[s]; if (sn !== '.') this.drum('s', t, sn === 'X');
+      const hh = dp.h[s]; if (hh !== '.') this.drum(s === 14 && bar % 2 === 1 ? 'o' : 'h', t);
+      if (dp.t && dp.t[s] !== '.') this.drum(s < 12 ? 'tom:180' : 'tom:120', t);
+    }
+    // Basso (radice dell'accordo nel registro Mi2-Re#3)
+    const root = pcInRange(ch.root, 40);
+    switch (tr.bass) {
+      case 'octave': if (s % 2 === 0) this.bass(s % 4 === 0 ? root : root + 12, t, sd * 1.7, 0.19); break;
+      case 'gallop': if (s % 4 !== 1) this.bass(root, t, sd * 0.9, 0.19); break;
+      case 'roots':  if (s % 4 === 0) this.bass(root, t, sd * 3.6, 0.19); else if (s % 4 === 3 && s % 8 === 7) this.bass(root + 7, t, sd * 0.9, 0.13); break;
+      default:       if (s % 2 === 0) this.bass(root, t, sd * 1.6, 0.18); // drive8
+    }
+    // Chitarra ritmica (power chord nel registro Mi3)
+    const gr = pcInRange(ch.root, 52), pc = [gr, gr + 7, gr + 12], change = tr.chordStart[i];
+    switch (tr.gtr) {
+      case 'quarters': if (s % 4 === 0) this.guitar(pc, t, sd * 3.8, 0.5, false); break;
+      case 'stab':     if (change) this.guitar(pc, t, sd * 1.8, 0.5, false); else if (s % 4 === 2) this.guitar(pc, t, sd * 0.9, 0.45, false); break;
+      case 'gallop':   if (s % 4 !== 1) this.guitar(pc, t, sd * (change ? 1.8 : 0.85), change ? 0.55 : 0.45, !change); break;
+      case '16ths':    if (change) this.guitar(pc, t, sd * 1.9, 0.55, false); else this.guitar(pc, t, sd * 0.8, 0.38, true); break;
+      default:         if (change) this.guitar(pc, t, sd * 1.9, 0.55, false); else if (s % 2 === 0) this.guitar(pc, t, sd * 0.9, 0.45, true); // 8ths
+    }
+    // Arpeggio scintillante (registro alto)
+    if (tr.arp) {
+      const tones = ch.tones.length >= 3 ? [ch.tones[0], ch.tones[1], ch.tones[2], 12] : [0, 7, 12, 19];
+      this.arp(pcInRange(ch.root, 64) + 12 + tones[s % 4], t, sd * 0.8, 0.035);
+    }
+    // Lead + seconda voce armonizzata
+    const ev = tr.leadEv[i];
+    if (ev) {
+      const dur = Math.max(sd * 0.8, ev.len * sd - 0.012);
+      this.lead(ev.midi, t, dur, 0.14);
+      if (tr.harm && (pass % 2 === 1 || tr.harm.indexOf(bar) >= 0)) this.lead(this.harmony(ev.midi, tr), t, dur, 0.08);
+    }
+  },
   update() {
     if (!this.cur || !Sound.ready) return;
-    const ac = Sound.ctx, tr = this.cur, stepDur = 60 / tr.bpm / 4;
-    if (this.next < ac.currentTime - 0.3) this.next = ac.currentTime;
+    const ac = Sound.ctx, tr = this.cur, sd = 60 / tr.bpm / 4;
+    if (this.next < ac.currentTime - 0.3) this.next = ac.currentTime + 0.02;
     let guard = 0;
-    while (this.next < ac.currentTime + 0.25 && guard++ < 32) {
-      const i = this.step % tr.lead.length, d = Math.max(0, this.next - ac.currentTime);
-      const ln = tr.lead[i];
-      if (ln) { const f = noteFreq(ln); Sound.tone(tr.leadType, f, f, stepDur * 0.9, tr.leadVol, d); }
-      const bn = tr.bass[i % tr.bass.length];
-      if (bn) { const f = noteFreq(bn); Sound.tone('triangle', f, f, stepDur * 1.6, tr.bassVol, d); }
-      this.next += stepDur; this.step++;
+    while (this.next < ac.currentTime + 0.2 && guard++ < 16) {
+      // in muto non si creano nodi audio (risparmio CPU), ma il tempo avanza
+      if (!Sound.muted) { try { this.ensureBus(); this.playStep(tr, this.step, this.next, sd); } catch (e) { /* un errore audio non deve mai fermare il gioco */ } }
+      this.next += sd; this.step++;
     }
   }
 };
@@ -920,16 +1096,14 @@ function buildCity() {
     solids: '#tCVBDLh~F',
     rows: g.map(r => r.join('')),
     spawn: { x: 6, y: 7 },
+    // Prologo alleggerito: meno folla, più spazio per imparare a muoversi e sparare
     enemies: [
       { type: 'cameriere', x: 12, y: 11 }, { type: 'cameriere', x: 28, y: 20 },
-      { type: 'cittadino', x: 18, y: 8 }, { type: 'cittadino', x: 24, y: 19 }, { type: 'cittadino', x: 8, y: 19 },
-      { type: 'cittadino', x: 36, y: 10 }, { type: 'cittadino', x: 44, y: 16 }, { type: 'cittadino', x: 30, y: 29 },
-      { type: 'cittadino', x: 16, y: 36 }, { type: 'cittadino', x: 40, y: 36 }, { type: 'cittadino', x: 49, y: 33 },
-      { type: 'cittadino', x: 58, y: 26 }, { type: 'cittadino', x: 22, y: 7 }, { type: 'cittadino', x: 60, y: 19 },
-      { type: 'gatto', x: 3, y: 11 }, { type: 'gatto', x: 26, y: 14 }, { type: 'gatto', x: 6, y: 15 },
-      { type: 'gatto', x: 36, y: 15 }, { type: 'gatto', x: 52, y: 25 }, { type: 'gatto', x: 12, y: 33 },
-      { type: 'cliente', x: 14, y: 13 }, { type: 'cliente', x: 38, y: 29 }, { type: 'cliente', x: 60, y: 30 }, { type: 'cliente', x: 22, y: 21 },
-      { type: 'piccione', x: 20, y: 19 }, { type: 'piccione', x: 46, y: 8 }, { type: 'piccione', x: 34, y: 31 }, { type: 'piccione', x: 55, y: 25 },
+      { type: 'cittadino', x: 18, y: 8 }, { type: 'cittadino', x: 36, y: 10 }, { type: 'cittadino', x: 30, y: 29 },
+      { type: 'cittadino', x: 40, y: 36 }, { type: 'cittadino', x: 58, y: 26 },
+      { type: 'gatto', x: 26, y: 14 }, { type: 'gatto', x: 52, y: 25 }, { type: 'gatto', x: 12, y: 33 },
+      { type: 'cliente', x: 22, y: 21 }, { type: 'cliente', x: 38, y: 29 },
+      { type: 'piccione', x: 46, y: 8 }, { type: 'piccione', x: 34, y: 31 },
     ],
     items: [
       { type: 'soy', x: 10, y: 7 }, { type: 'soy', x: 24, y: 11 }, { type: 'soy', x: 6, y: 14 }, { type: 'soy', x: 35, y: 13 },
@@ -2577,7 +2751,7 @@ function isFlying(e) { return e.def.behavior === 'flyer' || !!e.def.flying; }
 function makeEnemy(type, x, y) {
   const def = ENEMY_TYPES[type];
   return {
-    type, def, x, y, w: def.w, h: def.h, hp: def.hp, maxHp: def.hp, speed: def.speed, dmg: def.dmg,
+    type, def, x, y, homeX: x, homeY: y, w: def.w, h: def.h, hp: def.hp, maxHp: def.hp, speed: def.speed, dmg: def.dmg,
     state: def.boss ? 'sleep' : 'idle', stateT: rnd(0.5, 1.5), dirx: 0, diry: 0, anim: rnd(0, 10), flash: 0,
     kbx: 0, kby: 0, kbT: 0, confused: 0, confT: 0, fireCd: rnd(1, 2), cd: 0, throwT: 0,
     active: false, dead: false, facing: 1, moving: false, hover: rnd(0, 6.28), alt: def.behavior === 'flyer' ? 10 : def.behavior === 'drone' ? 14 : def.behavior === 'gnamzor' ? 24 : 0,
@@ -2823,7 +2997,7 @@ function updateEnemy(e, dt) {
       case 'gnamzor': aiGnamzor(e, dt, d, ux, uy); break;
       case 'chef': aiChef(e, dt, d, ux, uy); break;
     }
-  } else if (e.boss) { e.state = e.def.stationary ? 'idle' : 'walk'; e.alt = 0; } else { e.state = 'idle'; wander(e, dt, 0.4); }
+  } else if (e.boss) { e.state = e.def.stationary ? 'idle' : 'walk'; e.alt = 0; e.hidden = false; } else { e.state = 'idle'; wander(e, dt, 0.4); }
   e.moving = Math.abs(e.x - px0) > 0.01 || Math.abs(e.y - py0) > 0.01;
   if (e.x - px0 > 0.1) e.facing = 1; else if (e.x - px0 < -0.1) e.facing = -1;
   if (!p.dead) contactCheck(e);
@@ -2948,6 +3122,7 @@ function killEnemy(e, silent) {
 }
 function confuseEnemy(e) {
   if (e.boss && e.state === 'sleep') return; // il colpo lo sveglia, ma un orso che dorme non si confonde
+  if (e.hidden || e.dying || e.dead) return;  // Tako immerso nella lava o boss già sconfitto
   e.confused = e.boss ? CFG.wasabiBossDur : CFG.wasabiDur; e.confT = 0; e.alt = 0;
   spawnParticles(e.x, e.y - e.h / 2 - 6, { count: 10, colors: ['#7ee57e', '#3fbf3f', '#c8ffb0'], speed: 40, life: 0.6, size: 2, gravity: -30 });
   Sound.sfx('confuse');
@@ -3081,6 +3256,12 @@ function takoRoar(e, phase) {
 }
 function aiTako(e, dt, d, ux, uy) {
   const p = player;
+  // Cane da guardia: Tako non resta mai immerso troppo a lungo né bloccato in uno stato
+  e.hiddenT = e.hidden ? (e.hiddenT || 0) + dt : 0;
+  if (e.hiddenT > 2.5 && e.state !== 'submerge') { e.hidden = false; e.hiddenT = 0; e.state = 'idle'; e.cd = 0.5; }
+  if (e.state === e.lastState) e.stateAge = (e.stateAge || 0) + dt; else { e.stateAge = 0; e.lastState = e.state; }
+  if (e.state !== 'sleep' && e.state !== 'idle' && e.stateAge > 6) { e.state = 'idle'; e.cd = 0.5; e.hidden = false; e.combo = 0; e.stateAge = 0; }
+  if (!isFinite(e.x) || !isFinite(e.y)) { const pt = takoLakePoint(e); e.x = isFinite(pt.x) ? pt.x : tileCX(14); e.y = isFinite(pt.y) ? pt.y : tileCY(10); }
   e.cd = Math.max(0, e.cd - dt); e.facing = ux >= 0 ? 1 : -1;
   const frac = e.hp / e.maxHp, newPhase = frac > 0.62 ? 1 : frac > 0.3 ? 2 : 3;
   if (newPhase > e.phase && e.state !== 'sleep' && e.state !== 'roar' && e.state !== 'submerge' && e.state !== 'emerge') {
@@ -5400,12 +5581,31 @@ function init() {
 }
 
 let lastTime = performance.now();
+let loopErrors = 0;
 function loop(now) {
+  requestAnimationFrame(loop); // prenota subito il frame successivo: un errore non può più bloccare il gioco
   let dt = (now - lastTime) / 1000; lastTime = now;
-  if (dt > 0.05) dt = 0.05; // evita salti dopo un cambio di scheda
-  update(dt);
-  render();
-  requestAnimationFrame(loop);
+  if (!(dt > 0)) dt = 0;        // il primo timestamp di rAF può essere precedente a performance.now()
+  if (dt > 0.05) dt = 0.05;     // evita salti dopo un cambio di scheda
+  try { update(dt); } catch (err) { recoverFromError(err); }
+  try { render(); } catch (err) { recoverFromError(err); }
+}
+// Rete di sicurezza: se qualcosa va storto in un frame, ripulisce lo stato
+// "pericoloso" invece di congelare la partita.
+function recoverFromError(err) {
+  loopErrors++;
+  if (loopErrors < 20) console.error('[Rice Power] errore recuperato:', err);
+  try {
+    if (!isFinite(game.hitStop)) game.hitStop = 0;
+    game.hazards = (game.hazards || []).filter(h => isFinite(h.x) && isFinite(h.y));
+    game.projectiles = (game.projectiles || []).filter(pr => isFinite(pr.x) && isFinite(pr.y));
+    for (const e of game.enemies || []) {
+      if (!isFinite(e.x) || !isFinite(e.y)) { e.x = e.homeX || TILE * 4; e.y = e.homeY || TILE * 4; }
+      if (e.boss && e.hidden && !e.dying) { e.hidden = false; e.state = 'idle'; e.cd = 0.6; }
+    }
+    if (player && (!isFinite(player.x) || !isFinite(player.y)) && game.map && game.map.spawn) { player.x = tileCX(game.map.spawn.x); player.y = tileCY(game.map.spawn.y); }
+    Input.pressed = {};
+  } catch (e2) { /* non c'è altro da fare: il frame successivo riprova */ }
 }
 init();
 requestAnimationFrame(loop);
